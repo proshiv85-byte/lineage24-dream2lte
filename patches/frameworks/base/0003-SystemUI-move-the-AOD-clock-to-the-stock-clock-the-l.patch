@@ -1,0 +1,53 @@
+From 260bef9a1aca6fa4fa8378ebd2614c47ce6bcf60 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Wed, 28 Oct 2026 15:07:33 +0200
+Subject: [PATCH 3/4] SystemUI: move the AOD clock to the stock clock the
+ lockscreen shows
+
+The wake animation targeted the large clock whenever it was the current
+size on AOD, but with notifications the lockscreen settles on the small
+clock, so the AOD clock only faded in place. Both clocks stay laid out,
+so pick the more visible one on each frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I2ab8e78689d108872ba685d744f028ee51151f6d
+---
+ .../view/layout/sections/AodStyleSection.kt   | 20 +++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt
+index bc4534f2c..b7b51d9d3 100644
+--- a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt
++++ b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt
+@@ -282,10 +282,26 @@ constructor(
+         }
+     }
+ 
++    /**
++     * The stock clock the lockscreen settles on. Both clocks stay laid out and the lockscreen fades
++     * one in while waking, so pick the more visible one each frame instead of deciding up front.
++     */
+     private fun stockClockView(): View? {
+         val controller = clockViewModel.currentClock.value ?: return null
+-        return if (clockViewModel.isLargeClockVisible.value) controller.largeClock.view
+-        else controller.smallClock.view
++        return listOf(controller.smallClock.view, controller.largeClock.view)
++            .filter { it.isAttachedToWindow && it.isShown }
++            .maxByOrNull { it.effectiveAlpha() }
++    }
++
++    /** Alpha including the parents', which the lockscreen also animates. */
++    private fun View.effectiveAlpha(): Float {
++        var alpha = this.alpha
++        var parent = this.parent
++        while (parent is View) {
++            alpha *= parent.alpha
++            parent = parent.parent
++        }
++        return alpha
+     }
+ 
+     private fun lerp(start: Float, end: Float, fraction: Float) = start + (end - start) * fraction
+-- 
+2.56.0
+

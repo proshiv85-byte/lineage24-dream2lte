@@ -1,0 +1,296 @@
+From 84339ef7b9b5878ec957273830d71d42ba21e8f6 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Wed, 28 Oct 2026 16:00:53 +0200
+Subject: [PATCH 4/4] SystemUI: rework the AOD style animations
+
+- Use emphasized easing for the clock's motion and stagger the fades:
+  the date and battery fade first, the clock rises, shrinks and loosens
+  from condensed to regular width, and the scrim only reveals the
+  lockscreen once the clock has mostly left, so the stock clock under it
+  never shows next to this one. Entering AOD, the content fades in once
+  the scrim has covered the lockscreen.
+- Stop aiming the clock at the stock clock: the lockscreen keeps its
+  large clock while waking and moves it on its own afterwards.
+- Glide to new burn-in offsets instead of jumping.
+- Extend the scrim to the bottom indication area: the large two line
+  stock clock reaches past the middle of the screen.
+- Raise the style to Z 100 and hide it below a 0.01 AOD amount.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I5f32fd483b1d55a870cfbd3402d3dd7858913ebe
+---
+ .../view/layout/sections/AodStyleSection.kt   | 170 +++++++++++-------
+ 1 file changed, 107 insertions(+), 63 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt
+index b7b51d9d3..bab4111eb 100644
+--- a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt
++++ b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt
+@@ -29,6 +29,7 @@ import android.text.format.DateFormat
+ import android.util.TypedValue
+ import android.view.View
+ import android.widget.TextClock
++import com.android.app.animation.Interpolators
+ import androidx.constraintlayout.widget.ConstraintLayout
+ import androidx.constraintlayout.widget.ConstraintSet
+ import androidx.constraintlayout.widget.ConstraintSet.BOTTOM
+@@ -46,7 +47,6 @@ import com.android.systemui.keyguard.domain.interactor.KeyguardInteractor
+ import com.android.systemui.keyguard.domain.interactor.KeyguardTransitionInteractor
+ import com.android.systemui.keyguard.shared.model.KeyguardSection
+ import com.android.systemui.keyguard.shared.model.KeyguardState
+-import com.android.systemui.keyguard.ui.viewmodel.KeyguardClockViewModel
+ import com.android.systemui.lifecycle.repeatWhenAttached
+ import com.android.systemui.res.R
+ import com.android.systemui.shade.ShadeDisplayAware
+@@ -55,6 +55,7 @@ import com.android.systemui.statusbar.policy.BatteryController.BatteryStateChang
+ import java.util.Locale
+ import javax.inject.Inject
+ import kotlinx.coroutines.DisposableHandle
++import kotlin.math.abs
+ import kotlinx.coroutines.awaitCancellation
+ 
+ /**
+@@ -71,7 +72,6 @@ constructor(
+     @ShadeDisplayAware private val context: Context,
+     private val keyguardInteractor: KeyguardInteractor,
+     private val transitionInteractor: KeyguardTransitionInteractor,
+-    private val clockViewModel: KeyguardClockViewModel,
+     private val batteryController: BatteryController,
+ ) : KeyguardSection() {
+ 
+@@ -83,11 +83,14 @@ constructor(
+ 
+     /** 1 while dozing, 0 on the lockscreen; follows the AOD transition. */
+     private var aodAmount = 0f
++    /** Whether the device is going into AOD rather than out of it. */
++    private var enteringAod = false
+     /** Fades the style out while a notification pulses, so the stock pulse UI shows. */
+     private var pulseAlpha = 1f
+     private var pulseAnimator: ValueAnimator? = null
+-    private var burnInX = 0
+-    private var burnInY = 0
++    private var burnInX = 0f
++    private var burnInY = 0f
++    private var burnInAnimator: ValueAnimator? = null
+ 
+     private val content: List<View>
+         get() = listOf(clock, date, battery)
+@@ -110,7 +113,7 @@ constructor(
+                 format12Hour = "h:mm"
+                 format24Hour = "HH:mm"
+                 typeface = Typeface.create(CLOCK_FONT_FAMILY, Typeface.NORMAL)
+-                fontVariationSettings = CLOCK_FONT_VARIATIONS
++                fontVariationSettings = clockFontVariations(CLOCK_WIDTH, CLOCK_WEIGHT)
+                 setTextSize(TypedValue.COMPLEX_UNIT_PX, shortSide * CLOCK_SIZE_FRACTION)
+                 letterSpacing = CLOCK_LETTER_SPACING
+                 includeFontPadding = false
+@@ -158,6 +161,7 @@ constructor(
+                 repeatOnLifecycle(Lifecycle.State.CREATED) {
+                     launch("$TAG#aodAmount") {
+                         transitionInteractor.transitionValue(KeyguardState.AOD).collect {
++                            if (it != aodAmount) enteringAod = it > aodAmount
+                             aodAmount = it
+                             apply()
+                         }
+@@ -213,6 +217,7 @@ constructor(
+     override fun removeViews(constraintLayout: ConstraintLayout) {
+         bindingDisposable?.dispose()
+         pulseAnimator?.cancel()
++        burnInAnimator?.cancel()
+         (listOf(scrim) + content).forEach { constraintLayout.removeView(it) }
+     }
+ 
+@@ -233,75 +238,94 @@ constructor(
+         val res = context.resources
+         val amplitudeX = res.getDimensionPixelSize(R.dimen.burn_in_prevention_offset_x)
+         val amplitudeY = res.getDimensionPixelSize(R.dimen.burn_in_prevention_offset_y)
+-        burnInX = getBurnInOffset(amplitudeX * 2, true) - amplitudeX
+-        burnInY = getBurnInOffset(amplitudeY * 2, false) - amplitudeY
+-        apply()
++        val toX = (getBurnInOffset(amplitudeX * 2, true) - amplitudeX).toFloat()
++        val toY = (getBurnInOffset(amplitudeY * 2, false) - amplitudeY).toFloat()
++        val fromX = burnInX
++        val fromY = burnInY
++        // Glide to the new offset instead of jumping once a minute.
++        burnInAnimator?.cancel()
++        burnInAnimator =
++            ValueAnimator.ofFloat(0f, 1f).apply {
++                duration = BURN_IN_DURATION_MS
++                interpolator = Interpolators.STANDARD
++                addUpdateListener {
++                    val f = it.animatedValue as Float
++                    burnInX = lerp(fromX, toX, f)
++                    burnInY = lerp(fromY, toY, f)
++                    apply()
++                }
++                start()
++            }
+     }
+ 
++    /**
++     * Lays the style out for the current AOD amount: 1 on AOD, 0 on the lockscreen.
++     *
++     * Leaving AOD, the clock rises, shrinks and loosens from condensed to regular width with
++     * emphasized easing, and fades during the first half of the transition. The date and battery
++     * fade sooner and move less. The scrim then fades to reveal the lockscreen, whose clock
++     * animates in on its own. Entering AOD plays the motion in reverse, but the content only fades
++     * in once the scrim has covered the lockscreen.
++     */
+     private fun apply() {
+-        val amount = aodAmount * pulseAlpha
++        // Transition values can stop just short of 0; treat that as hidden.
++        val amount = (aodAmount * pulseAlpha).let { if (it < HIDDEN_AMOUNT) 0f else it }
+         val visibility = if (amount > 0f) View.VISIBLE else View.INVISIBLE
+         (listOf(scrim) + content).forEach { it.visibility = visibility }
+         if (amount <= 0f) return
+ 
+-        scrim.alpha = amount
+-        // The content fades a little ahead of the scrim, so the stock clock shows up underneath
+-        // while the large clock is still moving towards it.
+-        val contentAlpha = ((amount - CONTENT_FADE_START) / (1f - CONTENT_FADE_START)).coerceIn(0f, 1f)
+-
+-        // Shrink and move towards the stock clock while waking up.
+-        val progress = 1f - aodAmount
+-        var scale = 1f
+-        var dx = 0f
+-        var dy = 0f
+-        stockClockView()?.let { stock ->
+-            if (stock.isLaidOut && clock.isLaidOut && clock.height > 0) {
+-                val stockLocation = IntArray(2).also { stock.getLocationInWindow(it) }
+-                val parentLocation =
+-                    IntArray(2).also { (clock.parent as View).getLocationInWindow(it) }
+-                val stockCenterX = stockLocation[0] + stock.width * stock.scaleX / 2f
+-                val stockCenterY = stockLocation[1] + stock.height * stock.scaleY / 2f
+-                val clockCenterX = parentLocation[0] + clock.left + clock.width / 2f
+-                val clockCenterY = parentLocation[1] + clock.top + clock.height / 2f
+-                val targetScale =
+-                    (stock.height * stock.scaleY / clock.height).coerceIn(MIN_SCALE, 1f)
+-                scale = lerp(1f, targetScale, progress)
+-                dx = (stockCenterX - clockCenterX) * progress
+-                dy = (stockCenterY - clockCenterY) * progress
+-            }
+-        }
++        val progress = 1f - amount
++        val move = Interpolators.EMPHASIZED.getInterpolation(progress)
++        val rise = context.resources.displayMetrics.heightPixels * EXIT_RISE_FRACTION * move
+ 
++        // The scrim stays opaque while the clock leaves, so the stock clock under it never shows
++        // next to this one; then it reveals the lockscreen.
++        scrim.alpha = 1f - Interpolators.STANDARD.getInterpolation(
++            ((progress - SCRIM_FADE_START) / (1f - SCRIM_FADE_START)).coerceIn(0f, 1f)
++        )
++
++        val scale = lerp(1f, EXIT_SCALE, move)
+         clock.scaleX = scale
+         clock.scaleY = scale
++        clock.alpha = contentAlpha(progress, CLOCK_FADE_END)
++        setClockFont(width = lerp(CLOCK_WIDTH, EXIT_WIDTH, move), weight = lerp(CLOCK_WEIGHT, EXIT_WEIGHT, move))
++        clock.translationX = burnInX
++        clock.translationY = burnInY - rise
++
+         // Keep the date and battery attached to the bottom of the shrinking clock.
+         val clockShrink = clock.height * (1f - scale) / 2f
+-        content.forEach {
+-            it.alpha = contentAlpha
+-            it.translationX = burnInX + dx
+-            it.translationY = burnInY + dy - if (it === clock) 0f else clockShrink
++        val detailAlpha = contentAlpha(progress, DETAIL_FADE_END)
++        listOf(date, battery).forEach {
++            it.alpha = detailAlpha
++            it.translationX = burnInX
++            it.translationY = burnInY - rise * DETAIL_RISE_RATIO - clockShrink
+         }
+     }
+ 
+     /**
+-     * The stock clock the lockscreen settles on. Both clocks stay laid out and the lockscreen fades
+-     * one in while waking, so pick the more visible one each frame instead of deciding up front.
++     * Leaving AOD, content fades out over the first [fadeEnd] of the transition. Entering AOD, it
++     * only fades in once the scrim is opaque, so it never shows next to the dimming lockscreen.
+      */
+-    private fun stockClockView(): View? {
+-        val controller = clockViewModel.currentClock.value ?: return null
+-        return listOf(controller.smallClock.view, controller.largeClock.view)
+-            .filter { it.isAttachedToWindow && it.isShown }
+-            .maxByOrNull { it.effectiveAlpha() }
+-    }
+-
+-    /** Alpha including the parents', which the lockscreen also animates. */
+-    private fun View.effectiveAlpha(): Float {
+-        var alpha = this.alpha
+-        var parent = this.parent
+-        while (parent is View) {
+-            alpha *= parent.alpha
+-            parent = parent.parent
++    private fun contentAlpha(progress: Float, fadeEnd: Float): Float =
++        if (enteringAod) {
++            Interpolators.STANDARD_DECELERATE.getInterpolation(
++                ((SCRIM_FADE_START - progress) / SCRIM_FADE_START).coerceIn(0f, 1f)
++            )
++        } else {
++            1f - Interpolators.STANDARD_ACCELERATE.getInterpolation(
++                (progress / fadeEnd).coerceAtMost(1f)
++            )
+         }
+-        return alpha
++
++    private var clockFontWidth = Float.NaN
++    private var clockFontWeight = Float.NaN
++
++    /** Changes the clock axes; a change relayouts the text, so skip ones too small to see. */
++    private fun setClockFont(width: Float, weight: Float) {
++        if (abs(width - clockFontWidth) < 1f && abs(weight - clockFontWeight) < 2f) return
++        clockFontWidth = width
++        clockFontWeight = weight
++        clock.fontVariationSettings = clockFontVariations(width, weight)
+     }
+ 
+     private fun lerp(start: Float, end: Float, fraction: Float) = start + (end - start) * fraction
+@@ -378,17 +402,37 @@ constructor(
+ 
+         private const val CLOCK_FONT_FAMILY = "roboto-flex"
+         /** Narrowest width, display optical size and tall figures: a condensed clock. */
+-        private const val CLOCK_FONT_VARIATIONS = "'wdth' 25, 'wght' 560, 'opsz' 144, 'YTFI' 788"
++        private const val CLOCK_WIDTH = 25f
++        private const val CLOCK_WEIGHT = 560f
++
++        private fun clockFontVariations(width: Float, weight: Float) =
++            "'wdth' $width, 'wght' $weight, 'opsz' 144, 'YTFI' 788"
+         private const val CLOCK_SIZE_FRACTION = 0.326f
+         private const val CLOCK_LETTER_SPACING = 0.04f
+         private const val CLOCK_TOP_FRACTION = 0.2f
+-        /** The scrim covers the stock clock, smartspace and AOD notification area. */
+-        private const val SCRIM_HEIGHT_FRACTION = 0.62f
+-        private const val CONTENT_FADE_START = 0.3f
+-        private const val MIN_SCALE = 0.15f
++        /**
++         * The scrim covers everything above the bottom indication text: the stock clock (the large
++         * two line clock reaches past the middle of the screen), smartspace and AOD notifications.
++         */
++        private const val SCRIM_HEIGHT_FRACTION = 0.86f
++        /** Where the clock heads when leaving AOD; see [apply]. */
++        private const val EXIT_SCALE = 0.82f
++        private const val EXIT_WIDTH = 60f
++        private const val EXIT_WEIGHT = 420f
++        private const val EXIT_RISE_FRACTION = 0.05f
++        /** Fraction of the transition over which the clock and the details fade out. */
++        private const val CLOCK_FADE_END = 0.5f
++        private const val SCRIM_FADE_START = 0.3f
++        private const val DETAIL_FADE_END = 0.35f
++        private const val DETAIL_RISE_RATIO = 0.6f
++        private const val BURN_IN_DURATION_MS = 1000L
+         private const val PULSE_FADE_DURATION_MS = 200L
++        private const val HIDDEN_AMOUNT = 0.01f
+ 
+-        /** Z of the style, above the stock clock; the AOD notification icons go above it. */
+-        const val AOD_STYLE_Z = 1f
++        /**
++         * Z of the style, above the stock clock; the AOD notification icons go above it. The stock
++         * clock is raised while it animates between the lockscreen and AOD, so stay well above.
++         */
++        const val AOD_STYLE_Z = 100f
+     }
+ }
+-- 
+2.56.0
+

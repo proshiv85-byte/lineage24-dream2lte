@@ -1,0 +1,125 @@
+From 0d5907a93576609b254026f2495857266d1f9b60 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Wed, 4 Nov 2026 20:49:55 +0200
+Subject: [PATCH] Allow non-A/B OTA packages for TARGET_NO_RECOVERY devices
+
+Devices installed through a third-party recovery (TARGET_NO_RECOVERY)
+had no recovery fstab, so build_ota_package was false, bacon failed, and
+ota_from_target_files refused "no recovery" targets.
+
+With TARGET_NO_RECOVERY and TARGET_RECOVERY_FSTAB set:
+- build the OTA package,
+- copy the fstab to META/recovery.fstab and the install helpers to
+  INSTALL/ in the target files,
+- load the fstab from META/recovery.fstab in releasetools, and skip the
+  recovery image and recovery patch in the full OTA.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: Ifedaaf3c83f3d013c9ddf73e3c6a7009380fd3cc
+---
+ core/Makefile                    | 14 +++++++++++++-
+ tools/releasetools/common.py     |  6 ++++++
+ tools/releasetools/non_ab_ota.py | 17 +++++++++++------
+ 3 files changed, 30 insertions(+), 7 deletions(-)
+
+diff --git a/core/Makefile b/core/Makefile
+index 5136875..fcf54b3 100644
+--- a/core/Makefile
++++ b/core/Makefile
+@@ -5890,7 +5890,9 @@ else
+         build_ota_package := false
+       endif
+     endif # INSTALLED_BOOTIMAGE_TARGET == ""
+-    ifeq ($(recovery_fstab),)
++    # Non-A/B devices with TARGET_NO_RECOVERY (installed through a third-party
++    # recovery) can still build an OTA package from TARGET_RECOVERY_FSTAB.
++    ifeq ($(recovery_fstab)$(if $(filter true,$(TARGET_NO_RECOVERY)),$(TARGET_RECOVERY_FSTAB)),)
+       ifeq ($(filter $(TARGET_RECOVERY_ROOT_OUT)/system/etc/recovery.fstab,$(INTERNAL_RECOVERYIMAGE_FILES)),)
+         build_ota_package := false
+       endif
+@@ -6693,6 +6695,10 @@ $(BUILT_TARGET_FILES_DIR): $(INSTALLED_BOOTLOADER_MODULE)
+ droidcore-unbundled: $(INSTALLED_BOOTLOADER_MODULE)
+ endif
+ 
++ifeq ($(TARGET_NO_RECOVERY)$(if $(TARGET_RECOVERY_FSTAB),y),truey)
++$(BUILT_TARGET_FILES_DIR): $(TARGET_RECOVERY_FSTAB)
++endif
++
+ # Add a dependency for the signed desktop firmware. We need it included in the
+ # target_files.zip so that the unsigned firmware can be swapped with the signed
+ # firmware when the target files are signed.
+@@ -6976,6 +6982,12 @@ endif
+ 	$(hide) echo "$(PRODUCT_OTA_PUBLIC_KEYS)" > $(zip_root)/META/otakeys.txt
+ 	$(hide) cp $(SELINUX_FC) $(zip_root)/META/file_contexts.bin
+ 	$(hide) cp $(INSTALLED_MISC_INFO_TARGET) $(zip_root)/META/misc_info.txt
++ifeq ($(TARGET_NO_RECOVERY)$(if $(TARGET_RECOVERY_FSTAB),y),truey)
++	$(hide) cp $(TARGET_RECOVERY_FSTAB) $(zip_root)/META/recovery.fstab
++	@# OTA install helpers (normally copied with the recovery files)
++	$(hide) $(call package_files-copy-root, \
++	    $(PRODUCT_OUT)/install,$(zip_root)/INSTALL)
++endif
+ ifneq ($(INSTALLED_FASTBOOT_INFO_TARGET),)
+ 	$(hide) cp $(INSTALLED_FASTBOOT_INFO_TARGET) $(zip_root)/META/fastboot-info.txt
+ endif
+diff --git a/tools/releasetools/common.py b/tools/releasetools/common.py
+index fef646f..20cdf3b 100644
+--- a/tools/releasetools/common.py
++++ b/tools/releasetools/common.py
+@@ -1292,6 +1292,12 @@ def _FindAndLoadRecoveryFstab(info_dict, input_file, read_helper):
+     return LoadRecoveryFSTab(
+         read_helper, info_dict['fstab_version'], recovery_fstab_path)
+ 
++  # TARGET_NO_RECOVERY with TARGET_RECOVERY_FSTAB: the build copies the fstab
++  # to META/recovery.fstab so non-A/B OTAs can map partitions.
++  if DoesInputFileContain(input_file, 'META/recovery.fstab'):
++    return LoadRecoveryFSTab(
++        read_helper, info_dict['fstab_version'], 'META/recovery.fstab')
++
+   return None
+ 
+ 
+diff --git a/tools/releasetools/non_ab_ota.py b/tools/releasetools/non_ab_ota.py
+index 2d1075e..6e87ab1 100644
+--- a/tools/releasetools/non_ab_ota.py
++++ b/tools/releasetools/non_ab_ota.py
+@@ -149,7 +149,8 @@ def WriteFullOTAPackage(input_zip, output_file):
+       metadata=metadata,
+       info_dict=OPTIONS.info_dict)
+ 
+-  assert HasRecoveryPatch(input_zip, info_dict=OPTIONS.info_dict)
++  assert (OPTIONS.info_dict.get("no_recovery") == "true" or
++          HasRecoveryPatch(input_zip, info_dict=OPTIONS.info_dict))
+ 
+   # Assertions (e.g. downgrade check, device properties check).
+   #ts = target_info.GetBuildProp("ro.build.date.utc")
+@@ -184,10 +185,11 @@ def WriteFullOTAPackage(input_zip, output_file):
+   #    complete script normally
+   #    (allow recovery to mark itself finished and reboot)
+ 
+-  recovery_img = common.GetBootableImage("recovery.img", "recovery.img",
+-                                         OPTIONS.input_tmp, "RECOVERY")
+-  common.CheckSize(recovery_img.data, "recovery.img", target_info)
+-  common.ZipWriteStr(output_zip, "recovery.img", recovery_img.data)
++  if target_info.get("no_recovery") != "true":
++    recovery_img = common.GetBootableImage("recovery.img", "recovery.img",
++                                           OPTIONS.input_tmp, "RECOVERY")
++    common.CheckSize(recovery_img.data, "recovery.img", target_info)
++    common.ZipWriteStr(output_zip, "recovery.img", recovery_img.data)
+   if OPTIONS.two_step:
+     if not target_info.get("multistage_support"):
+       assert False, "two-step packages not supported by this build"
+@@ -574,7 +576,10 @@ endif;
+ def GenerateNonAbOtaPackage(target_file, output_file, source_file=None):
+   """Generates a non-A/B OTA package."""
+   # Check the loaded info dicts first.
+-  if OPTIONS.info_dict.get("no_recovery") == "true":
++  # TARGET_NO_RECOVERY builds can still be installed by a third-party recovery
++  # as long as the build provided an fstab (META/recovery.fstab).
++  if (OPTIONS.info_dict.get("no_recovery") == "true" and
++      not OPTIONS.info_dict.get("fstab")):
+     raise common.ExternalError(
+         "--- target build has specified no recovery ---")
+ 
+-- 
+2.56.0
+

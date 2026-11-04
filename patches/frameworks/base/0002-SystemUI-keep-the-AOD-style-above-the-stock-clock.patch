@@ -1,0 +1,67 @@
+From 166d55e2befbb67998d66bfaae8a99aef9ea8738 Mon Sep 17 00:00:00 2001
+From: proshiv85-byte <proshiv85@gmail.com>
+Date: Wed, 28 Oct 2026 14:33:31 +0200
+Subject: [PATCH 2/4] SystemUI: keep the AOD style above the stock clock
+
+The stock clock views are removed and added again when the clock
+changes, which put them above the AOD style scrim. Raise the style with
+translationZ instead of relying on the view order, and the AOD
+notification icons above it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I8c89d63988ca818621e83a74826eeb156070e492
+---
+ .../view/layout/sections/AodNotificationIconsSection.kt   | 2 +-
+ .../keyguard/ui/view/layout/sections/AodStyleSection.kt   | 8 ++++++++
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodNotificationIconsSection.kt b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodNotificationIconsSection.kt
+index 300970be2..3fd4b42c4 100644
+--- a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodNotificationIconsSection.kt
++++ b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodNotificationIconsSection.kt
+@@ -67,7 +67,7 @@ constructor(
+                 // Centered below the AodStyleSection battery, drawn above its scrim.
+                 val padding = resources.getDimensionPixelOffset(R.dimen.shelf_icon_container_padding)
+                 setPaddingRelative(padding, 0, padding, 0)
+-                translationZ = 1f
++                translationZ = AodStyleSection.AOD_STYLE_Z + 1f
+                 setVisibility(View.INVISIBLE)
+             }
+ 
+diff --git a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt
+index 10e12908c..bc4534f2c 100644
+--- a/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt
++++ b/packages/SystemUI/src/com/android/systemui/keyguard/ui/view/layout/sections/AodStyleSection.kt
+@@ -100,6 +100,8 @@ constructor(
+             View(context).apply {
+                 id = R.id.aod_style_scrim
+                 setBackgroundColor(Color.BLACK)
++                // It is raised with translationZ; no outline, so it casts no shadow.
++                outlineProvider = null
+                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+             }
+         clock =
+@@ -140,8 +142,11 @@ constructor(
+             }
+         battery = BatteryPillView(context).apply { id = R.id.aod_style_battery }
+ 
++        // The stock clock views are re-added to the root whenever the clock changes, which puts
++        // them last in drawing order; use Z instead of the view order to stay above them.
+         (listOf(scrim) + content).forEach {
+             it.visibility = View.INVISIBLE
++            it.translationZ = AOD_STYLE_Z
+             constraintLayout.addView(it)
+         }
+     }
+@@ -366,5 +371,8 @@ constructor(
+         private const val CONTENT_FADE_START = 0.3f
+         private const val MIN_SCALE = 0.15f
+         private const val PULSE_FADE_DURATION_MS = 200L
++
++        /** Z of the style, above the stock clock; the AOD notification icons go above it. */
++        const val AOD_STYLE_Z = 1f
+     }
+ }
+-- 
+2.56.0
+

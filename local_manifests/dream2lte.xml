@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remote name="dream2lte" fetch="https://github.com/proshiv85-byte" />
+
+  <!-- Use the dream2lte forks (as in the AOSP 17 port) instead of Lineage's copies -->
+  <remove-project name="LineageOS/android_hardware_lineage_compat" />
+  <remove-project name="LineageOS/android_hardware_google_pixel" />
+
+  <project path="device/samsung/dream2lte" name="android_device_samsung_dream2lte" remote="dream2lte" revision="lineage-24.0" />
+  <project path="device/samsung/universal8895-common" name="android_device_samsung_universal8895-common" remote="dream2lte" revision="lineage-24.0" />
+  <project path="device/samsung/dream2lte-kernel" name="android_device_samsung_dream2lte-kernel" remote="dream2lte" revision="dream2lte" />
+  <project path="device/samsung_slsi/sepolicy" name="android_device_samsung_slsi_sepolicy" remote="dream2lte" revision="dream2lte" />
+  <project path="hardware/samsung" name="android_hardware_samsung" remote="dream2lte" revision="dream2lte" />
+  <project path="hardware/google/pixel" name="android_hardware_google_pixel" remote="dream2lte" revision="dream2lte" />
+  <project path="hardware/lineage/compat" name="android_hardware_lineage_compat" remote="dream2lte" revision="dream2lte" />
+  <project path="vendor/samsung" name="proprietary_vendor_samsung" remote="dream2lte" revision="dream2lte" />
+</manifest>
